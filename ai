@@ -792,7 +792,6 @@ use_account_codex() {
   local unified_file="$1"
   local account="$2"
   local active_auth_file="${CODEX_AUTH_FILE}"
-  local backup
   local tmp
 
   tmp="$(new_tmp)"
@@ -810,10 +809,6 @@ use_account_codex() {
       tmp="${merged_tmp}"
     fi
 
-    backup="${active_auth_file}.bak-$(date +%Y%m%d-%H%M%S)"
-    cp "${active_auth_file}" "${backup}"
-    chmod 600 "${backup}" || true
-    echo "Backup created: ${backup}"
   else
     echo "Codex auth file does not exist yet, creating a new one."
   fi
@@ -827,7 +822,6 @@ use_account_opencode() {
   local unified_file="$1"
   local account="$2"
   local active_auth_file="${OPENCODE_AUTH_FILE}"
-  local backup
   local openai_tmp
   local tmp
   local openai_json
@@ -851,11 +845,6 @@ use_account_opencode() {
   fi
 
   openai_json="$(cat "${openai_tmp}")"
-
-  backup="${active_auth_file}.bak-$(date +%Y%m%d-%H%M%S)"
-  cp "${active_auth_file}" "${backup}"
-  chmod 600 "${backup}" || true
-  echo "Backup created: ${backup}"
 
   tmp="$(new_tmp)"
   jq --argjson openai "${openai_json}" '.openai = $openai' "${active_auth_file}" > "${tmp}"

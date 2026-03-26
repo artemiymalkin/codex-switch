@@ -34,7 +34,7 @@ ai --platform opencode use work
 
 - Without `--platform`, `save` and `use` apply to all available platforms.
 - Missing platforms are skipped with a warning unless explicitly requested.
-- `use` creates backups before overwriting active auth files.
+- `use` overwrites active auth files without creating backups.
 - `usage` shows Codex limits and requires `codex` CLI plus `tmux`.
 
 ## Storage
