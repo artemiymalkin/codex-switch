@@ -1,0 +1,21 @@
+# Secrets and credentials
+auth.json
+auth.json.bak-*
+credentials/
+legacy-backup-*
+
+# Common secret formats
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.secret
+
+# Local artifacts
+*.log
+*.sqlite
+*.sqlite-*
+*.bak
+.DS_Store
