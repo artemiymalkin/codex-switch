@@ -502,6 +502,11 @@ list_active_profiles() {
 show_usage_limits() {
   local session="codex-status"
   local output
+  local tmux_socket="ai-switch"
+
+  tmux_cmd() {
+    TMUX= tmux -L "$tmux_socket" "$@"
+  }
 
   if ! command -v tmux >/dev/null 2>&1; then
     warn "tmux is required for 'ai usage'."
@@ -513,25 +518,25 @@ show_usage_limits() {
     return 1
   fi
 
-  tmux kill-session -t "$session" 2>/dev/null || true
-  if ! tmux new-session -d -s "$session"; then
+  tmux_cmd kill-session -t "$session" 2>/dev/null || true
+  if ! tmux_cmd new-session -d -s "$session"; then
     warn "Failed to create tmux session '${session}'."
     return 1
   fi
 
-  tmux send-keys -t "$session" "codex" C-m
+  tmux_cmd send-keys -t "$session" "codex" C-m
   sleep 5
-  tmux send-keys -t "$session" "/status" C-m
+  tmux_cmd send-keys -t "$session" "/status" C-m
   sleep 2
 
   output="$(
-    tmux capture-pane -t "$session" -p -S -200 \
+    tmux_cmd capture-pane -t "$session" -p -S -200 \
     | tr -d '\r' \
     | grep -Eo '[0-9]+h [0-9]+%|weekly [0-9]+%' \
     | paste -sd ' · ' -
   )"
 
-  tmux kill-session -t "$session" 2>/dev/null || true
+  tmux_cmd kill-session -t "$session" 2>/dev/null || true
 
   if [[ -n "$output" ]]; then
     echo "$output"
