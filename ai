@@ -825,19 +825,83 @@ build_openai_object_from_unified() {
   '
 }
 
+auto_save_active_account() {
+  local platform="$1"
+  local target_account_id="$2"
+  local target_account_name="$3"
+  local active_auth_file
+  local active_account_id
+  local active_account_name=""
+
+  case "${platform}" in
+    codex) active_auth_file="${CODEX_AUTH_FILE}" ;;
+    opencode) active_auth_file="${OPENCODE_AUTH_FILE}" ;;
+    *) return 0 ;;
+  esac
+
+  [[ -f "${active_auth_file}" ]] || return 0
+
+  case "${platform}" in
+    codex)
+      active_account_id="$(jq -r '.tokens.account_id // empty' "${active_auth_file}" 2>/dev/null || true)"
+      ;;
+    opencode)
+      active_account_id="$(jq -r '.openai.accountId // empty' "${active_auth_file}" 2>/dev/null || true)"
+      ;;
+  esac
+
+  [[ -n "${active_account_id}" ]] || return 0
+
+  if [[ -n "${target_account_id}" && "${active_account_id}" == "${target_account_id}" ]]; then
+    # Already on the requested account; refresh the store from the active session.
+    if save_account_platform "${platform}" "${target_account_name}"; then
+      echo "Already active on '${target_account_name}' for $(platform_label "${platform}"); refreshed stored tokens."
+    else
+      warn "Could not refresh stored tokens for '${target_account_name}' from active $(platform_label "${platform}")."
+      echo "Already active on '${target_account_name}' for $(platform_label "${platform}"); leaving auth file unchanged."
+    fi
+    return 2
+  fi
+
+  if active_account_name="$(find_account_name_by_account_id "${active_account_id}" 2>/dev/null || true)"; then
+    if [[ -n "${active_account_name}" ]]; then
+      if save_account_platform "${platform}" "${active_account_name}"; then
+        echo "Saved current $(platform_label "${platform}") session as '${active_account_name}'."
+      else
+        warn "Could not save current $(platform_label "${platform}") session for '${active_account_name}'."
+      fi
+    fi
+  fi
+
+  return 0
+}
+
 use_account_codex() {
   local unified_file="$1"
   local account="$2"
   local active_auth_file="${CODEX_AUTH_FILE}"
   local tmp
+  local target_account_id
 
   tmp="$(new_tmp)"
   build_codex_auth_from_unified "${unified_file}" > "${tmp}"
+  target_account_id="$(jq -r '.tokens.account_id // empty' "${unified_file}" 2>/dev/null || true)"
+
+  if auto_save_active_account codex "${target_account_id}" "${account}"; then
+    :
+  else
+    local status=$?
+    if [[ "${status}" -eq 2 ]]; then
+      return 0
+    fi
+  fi
 
   if [[ -f "${active_auth_file}" ]]; then
+    local existing_account_id
     local existing_id_token
+    existing_account_id="$(jq -r '.tokens.account_id // empty' "${active_auth_file}" 2>/dev/null || true)"
     existing_id_token="$(jq -r '.tokens.id_token // empty' "${active_auth_file}" 2>/dev/null || true)"
-    if [[ -n "${existing_id_token}" ]]; then
+    if [[ -n "${existing_id_token}" && -n "${target_account_id}" && "${existing_account_id}" == "${target_account_id}" ]]; then
       local merged_tmp
       merged_tmp="$(new_tmp)"
       jq --arg id_token "${existing_id_token}" \
@@ -862,6 +926,7 @@ use_account_opencode() {
   local openai_tmp
   local tmp
   local openai_json
+  local target_account_id
 
   if [[ ! -f "${active_auth_file}" ]]; then
     fail "OpenCode auth file not found at ${active_auth_file}. Run 'opencode auth login' first."
@@ -869,16 +934,31 @@ use_account_opencode() {
 
   openai_tmp="$(new_tmp)"
   build_openai_object_from_unified "${unified_file}" > "${openai_tmp}"
+  target_account_id="$(jq -r '.tokens.account_id // empty' "${unified_file}" 2>/dev/null || true)"
+
+  if auto_save_active_account opencode "${target_account_id}" "${account}"; then
+    :
+  else
+    local status=$?
+    if [[ "${status}" -eq 2 ]]; then
+      return 0
+    fi
+  fi
+
   if [[ -f "${active_auth_file}" ]]; then
+    local existing_account_id
     local existing_openai
     local merged_openai
+    existing_account_id="$(jq -r '.openai.accountId // empty' "${active_auth_file}" 2>/dev/null || true)"
     existing_openai="$(jq -c '.openai // {}' "${active_auth_file}" 2>/dev/null || echo '{}')"
-    merged_openai="$(new_tmp)"
-    jq --argjson existing "${existing_openai}" '
-      .expires = (if (.expires == 0 or .expires == null) and ($existing.expires != null) then $existing.expires else .expires end)
-      | .type = (if (.type == "oauth" or .type == null) and ($existing.type != null) then $existing.type else .type end)
-    ' "${openai_tmp}" > "${merged_openai}"
-    openai_tmp="${merged_openai}"
+    if [[ -n "${target_account_id}" && "${existing_account_id}" == "${target_account_id}" ]]; then
+      merged_openai="$(new_tmp)"
+      jq --argjson existing "${existing_openai}" '
+        .expires = (if (.expires == 0 or .expires == null) and ($existing.expires != null) then $existing.expires else .expires end)
+        | .type = (if (.type == "oauth" or .type == null) and ($existing.type != null) then $existing.type else .type end)
+      ' "${openai_tmp}" > "${merged_openai}"
+      openai_tmp="${merged_openai}"
+    fi
   fi
 
   openai_json="$(cat "${openai_tmp}")"
