@@ -34,9 +34,11 @@ ai --platform opencode use work
 ### Notes
 
 - Without `--platform`, `save` and `use` apply to all available platforms.
+- When `save` is called without `--platform`, it prompts for the platform with the latest credentials and refreshes only that platform's tokens.
 - Missing platforms are skipped with a warning unless explicitly requested.
 - `use` overwrites active auth files without creating backups.
 - `use` refreshes the stored entry for the currently active account before switching.
+- Tokens are stored per platform; run `ai --platform codex save <account>` and `ai --platform opencode save <account>` at least once per account.
 - `delete` removes a saved account from the shared store.
 - `usage` shows Codex limits and requires `codex` CLI plus `tmux`.
 

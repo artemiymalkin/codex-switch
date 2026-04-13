@@ -12,6 +12,7 @@ LEGACY_STORE_DIR="${CODEX_HOME}/credentials"
 LEGACY_OPENCODE_DIR="${CODEX_HOME}/credentials/opencode-openai"
 
 UNIFIED_FORMAT="unified-openai-auth"
+UNIFIED_VERSION=2
 
 TMP_FILES=()
 cleanup() {
@@ -103,6 +104,34 @@ validate_platform() {
   esac
 }
 
+prompt_save_platform() {
+  local choice=""
+  local reply=""
+
+  if [[ ! -t 0 ]]; then
+    echo "all"
+    return 0
+  fi
+
+  while true; do
+    printf "Select platform with the latest credentials (only that platform is refreshed):\n" > /dev/tty
+    printf "1) Codex\n2) OpenCode\n3) Cancel\n" > /dev/tty
+    printf "Enter choice: " > /dev/tty
+    if ! IFS= read -r reply < /dev/tty; then
+      return 1
+    fi
+    case "${reply}" in
+      1) choice="codex" ;;
+      2) choice="opencode" ;;
+      3) return 1 ;;
+      *) printf "Invalid selection. Choose 1-3.\n" > /dev/tty ;;
+    esac
+    [[ -n "${choice}" ]] && break
+  done
+
+  echo "${choice}"
+}
+
 platform_label() {
   case "$1" in
     codex) echo "Codex" ;;
@@ -162,6 +191,7 @@ build_unified_from_codex_file() {
 
   jq -n \
     --arg format "${UNIFIED_FORMAT}" \
+    --argjson version "${UNIFIED_VERSION}" \
     --arg updated_at "${updated_at}" \
     --arg auth_mode "${auth_mode}" \
     --arg last_refresh "${last_refresh}" \
@@ -169,15 +199,16 @@ build_unified_from_codex_file() {
     --argjson tokens "${tokens_json}" \
     '{
       format: $format,
-      version: 1,
+      version: $version,
       updated_at: $updated_at,
       source: "codex",
-      tokens: ($tokens + {id_token: ($tokens.id_token // null)}),
-      opencode: { expires: null, type: null },
+      tokens: null,
+      opencode: { expires: null, type: null, tokens: null },
       codex: {
         auth_mode: $auth_mode,
         openai_api_key: $openai_api_key,
-        last_refresh: (if $last_refresh == "" then null else $last_refresh end)
+        last_refresh: (if $last_refresh == "" then null else $last_refresh end),
+        tokens: ($tokens + {id_token: ($tokens.id_token // null)})
       }
     }'
 }
@@ -190,27 +221,29 @@ build_unified_from_openai_json() {
 
   jq -n \
     --arg format "${UNIFIED_FORMAT}" \
+    --argjson version "${UNIFIED_VERSION}" \
     --arg updated_at "${updated_at}" \
     --argjson openai "${openai_json}" \
     '{
       format: $format,
-      version: 1,
+      version: $version,
       updated_at: $updated_at,
       source: "opencode",
-      tokens: {
-        access_token: $openai.access,
-        refresh_token: $openai.refresh,
-        account_id: $openai.accountId,
-        id_token: null
-      },
+      tokens: null,
       opencode: {
         expires: ($openai.expires // null),
-        type: ($openai.type // null)
+        type: ($openai.type // null),
+        tokens: {
+          access: $openai.access,
+          refresh: $openai.refresh,
+          accountId: $openai.accountId
+        }
       },
       codex: {
         auth_mode: "chatgpt",
         openai_api_key: null,
-        last_refresh: null
+        last_refresh: null,
+        tokens: null
       }
     }'
 }
@@ -253,6 +286,7 @@ try_build_unified_from_codex_file() {
 
   jq -n \
     --arg format "${UNIFIED_FORMAT}" \
+    --argjson version "${UNIFIED_VERSION}" \
     --arg updated_at "${updated_at}" \
     --arg auth_mode "${auth_mode}" \
     --arg last_refresh "${last_refresh}" \
@@ -260,15 +294,16 @@ try_build_unified_from_codex_file() {
     --argjson tokens "${tokens_json}" \
     '{
       format: $format,
-      version: 1,
+      version: $version,
       updated_at: $updated_at,
       source: "codex",
-      tokens: ($tokens + {id_token: ($tokens.id_token // null)}),
-      opencode: { expires: null, type: null },
+      tokens: null,
+      opencode: { expires: null, type: null, tokens: null },
       codex: {
         auth_mode: $auth_mode,
         openai_api_key: $openai_api_key,
-        last_refresh: (if $last_refresh == "" then null else $last_refresh end)
+        last_refresh: (if $last_refresh == "" then null else $last_refresh end),
+        tokens: ($tokens + {id_token: ($tokens.id_token // null)})
       }
     }'
 }
@@ -285,11 +320,83 @@ try_build_unified_from_openai_object_file() {
   build_unified_from_openai_json "${openai_json}"
 }
 
+upgrade_unified_v1_to_v2() {
+  local file="$1"
+
+  jq -n --slurpfile v1 "${file}" '
+    def ensure_obj(x):
+      if (x | type) == "object" then x else {} end;
+    $v1[0] as $u |
+    {
+      format: $u.format,
+      version: 2,
+      updated_at: $u.updated_at,
+      source: ($u.source // "mixed"),
+      tokens: ($u.tokens // null),
+      codex: (
+        ensure_obj($u.codex)
+        | .auth_mode = (.auth_mode // "chatgpt")
+        | .openai_api_key = (.openai_api_key // null)
+        | .last_refresh = (.last_refresh // null)
+        | .tokens = (if ($u.source // "") == "codex" then (($u.tokens // {}) + {id_token: (($u.tokens // {}).id_token // null)}) else null end)
+      ),
+      opencode: (
+        ensure_obj($u.opencode)
+        | .expires = (.expires // null)
+        | .type = (.type // null)
+        | .tokens = (if ($u.source // "") == "opencode" then {access: ($u.tokens // {}).access_token, refresh: ($u.tokens // {}).refresh_token, accountId: ($u.tokens // {}).account_id} else null end)
+      )
+    }
+  '
+}
+
+has_codex_tokens() {
+  local file="$1"
+  jq -e '.codex.tokens? | type == "object" and has("access_token") and has("refresh_token") and has("account_id")' "${file}" >/dev/null 2>&1
+}
+
+has_opencode_tokens() {
+  local file="$1"
+  jq -e '.opencode.tokens? | type == "object" and has("access") and has("refresh") and has("accountId")' "${file}" >/dev/null 2>&1
+}
+
+has_shared_tokens() {
+  local file="$1"
+  jq -e '.tokens? | type == "object" and has("access_token") and has("refresh_token") and has("account_id")' "${file}" >/dev/null 2>&1
+}
+
+select_codex_tokens_source() {
+  local file="$1"
+  if has_codex_tokens "${file}"; then
+    echo "codex"
+  elif has_shared_tokens "${file}"; then
+    echo "shared"
+  else
+    echo ""
+  fi
+}
+
+select_opencode_tokens_source() {
+  local file="$1"
+  if has_opencode_tokens "${file}"; then
+    echo "opencode"
+  elif has_shared_tokens "${file}"; then
+    echo "shared"
+  else
+    echo ""
+  fi
+}
+
 normalize_saved_file() {
   local file="$1"
 
-  if jq -e ".format == \"${UNIFIED_FORMAT}\"" "${file}" >/dev/null 2>&1; then
+  if jq -e ".format == \"${UNIFIED_FORMAT}\" and .version == ${UNIFIED_VERSION}" "${file}" >/dev/null 2>&1; then
     cat "${file}"
+    return 0
+  fi
+
+  if jq -e ".format == \"${UNIFIED_FORMAT}\" and (.version == 1 or .version == null)" "${file}" >/dev/null 2>&1; then
+    upgrade_unified_v1_to_v2 "${file}"
     return 0
   fi
 
@@ -318,15 +425,28 @@ merge_unified_files() {
   jq -n --slurpfile existing "${existing}" --slurpfile incoming "${incoming}" '
     def pick(new; old):
       if new == null or new == "" then old else new end;
+    def pick_obj(new; old):
+      if new == null or new == {} then old else new end;
+    def ensure_obj(x):
+      if (x | type) == "object" then x else {} end;
     $incoming[0] as $n | $existing[0] as $e |
     $n
+    | .version = 2
     | .source = "mixed"
-    | .tokens.id_token = pick(.tokens.id_token; $e.tokens.id_token)
-    | .opencode.expires = pick(.opencode.expires; $e.opencode.expires)
-    | .opencode.type = pick(.opencode.type; $e.opencode.type)
-    | .codex.auth_mode = pick(.codex.auth_mode; $e.codex.auth_mode)
-    | .codex.openai_api_key = (if .codex.openai_api_key == null then $e.codex.openai_api_key else .codex.openai_api_key end)
-    | .codex.last_refresh = pick(.codex.last_refresh; $e.codex.last_refresh)
+    | .tokens = pick_obj(.tokens; $e.tokens)
+    | .codex = (
+        ensure_obj(.codex)
+        | .auth_mode = pick(.auth_mode; ($e.codex.auth_mode // null))
+        | .openai_api_key = (if .openai_api_key == null then ($e.codex.openai_api_key // null) else .openai_api_key end)
+        | .last_refresh = pick(.last_refresh; ($e.codex.last_refresh // null))
+        | .tokens = pick_obj(.tokens; ($e.codex.tokens // null))
+      )
+    | .opencode = (
+        ensure_obj(.opencode)
+        | .expires = pick(.expires; ($e.opencode.expires // null))
+        | .type = pick(.type; ($e.opencode.type // null))
+        | .tokens = pick_obj(.tokens; ($e.opencode.tokens // null))
+      )
   '
 }
 
@@ -335,11 +455,12 @@ check_unified_file() {
   jq -e --arg format "${UNIFIED_FORMAT}" '
     type == "object"
     and .format == $format
-    and (.version == 1)
-    and (.tokens | type == "object")
-    and (.tokens.access_token | type == "string")
-    and (.tokens.refresh_token | type == "string")
-    and (.tokens.account_id | type == "string")
+    and (.version == 2)
+    and (
+      (.codex.tokens? | type == "object" and has("access_token") and has("refresh_token") and has("account_id"))
+      or (.opencode.tokens? | type == "object" and has("access") and has("refresh") and has("accountId"))
+      or (.tokens? | type == "object" and has("access_token") and has("refresh_token") and has("account_id"))
+    )
   ' "${file}" >/dev/null 2>&1
 }
 
@@ -352,7 +473,9 @@ account_id_from_saved_file() {
   local file="$1"
   local account_id=""
 
-  if jq -e ".format == \"${UNIFIED_FORMAT}\"" "${file}" >/dev/null 2>&1; then
+  if jq -e ".format == \"${UNIFIED_FORMAT}\" and .version == 2" "${file}" >/dev/null 2>&1; then
+    account_id="$(jq -r '.codex.tokens.account_id // .opencode.tokens.accountId // .tokens.account_id // empty' "${file}" 2>/dev/null || true)"
+  elif jq -e ".format == \"${UNIFIED_FORMAT}\" and (.version == 1 or .version == null)" "${file}" >/dev/null 2>&1; then
     account_id="$(jq -r '.tokens.account_id // empty' "${file}" 2>/dev/null || true)"
   elif jq -e 'has("auth_mode") and has("tokens")' "${file}" >/dev/null 2>&1; then
     account_id="$(jq -r '.tokens.account_id // empty' "${file}" 2>/dev/null || true)"
@@ -764,47 +887,76 @@ save_account_platform() {
 }
 
 save_account_all() {
-  local account="$1"
-  local did_any=0
+  local source_platform="$1"
+  local account="$2"
+  local target="${STORE_DIR}/${account}.json"
+  local new_file
+  local merged_file
+  local existing_file
 
-  echo "Applying to all available platforms."
+  echo "Saving credentials from ${source_platform} (other platform tokens stay unchanged if present)."
 
-  if platform_available codex; then
-    save_account_platform codex "${account}"
-    did_any=1
-  else
-    warn "Codex auth file not found; skipping Codex."
+  if ! platform_available "${source_platform}"; then
+    fail "$(platform_label "${source_platform}") auth file not found; cannot save."
   fi
 
-  if platform_available opencode; then
-    save_account_platform opencode "${account}"
-    did_any=1
-  else
-    warn "OpenCode auth file not found; skipping OpenCode."
+  case "${source_platform}" in
+    codex)
+      new_file="$(new_tmp)"
+      build_unified_from_codex_file "${CODEX_AUTH_FILE}" > "${new_file}"
+      ;;
+    opencode)
+      new_file="$(new_tmp)"
+      build_unified_from_opencode_auth_file "${OPENCODE_AUTH_FILE}" > "${new_file}"
+      ;;
+    *)
+      fail "Unsupported platform '${source_platform}'."
+      ;;
+  esac
+
+  if [[ -f "${target}" ]]; then
+    existing_file="$(new_tmp)"
+    normalize_saved_file_or_fail "${target}" > "${existing_file}"
+    merged_file="$(new_tmp)"
+    merge_unified_files "${existing_file}" "${new_file}" > "${merged_file}"
+    new_file="${merged_file}"
   fi
 
-  if [[ "${did_any}" -eq 0 ]]; then
-    fail "No platforms available to save."
-  fi
+  validate_unified_file "${new_file}"
+  ensure_dirs
+  mv "${new_file}" "${target}"
+  chmod 600 "${target}" || true
+  echo "Saved $(platform_label "${source_platform}") account '${account}' to ${target}"
 }
 
 build_codex_auth_from_unified() {
   local unified_file="$1"
   local updated_at
+  local tokens_source
 
   updated_at="$(now_utc)"
+  tokens_source="$(select_codex_tokens_source "${unified_file}")"
+
+  if [[ -z "${tokens_source}" ]]; then
+    fail "Codex tokens missing for this account. Run 'ai --platform codex save <account>' after logging in."
+  fi
+
+  if [[ "${tokens_source}" == "shared" ]]; then
+    warn "Using shared tokens for Codex. Re-login and run 'ai --platform codex save <account>' to avoid refresh conflicts."
+  fi
 
   jq -n --arg updated_at "${updated_at}" --slurpfile u "${unified_file}" '
     $u[0] as $u |
+    ($u.codex.tokens // $u.tokens) as $t |
     {
       OPENAI_API_KEY: $u.codex.openai_api_key,
       auth_mode: ($u.codex.auth_mode // "chatgpt"),
       last_refresh: (if ($u.codex.last_refresh // "") == "" then $updated_at else $u.codex.last_refresh end),
       tokens: {
-        access_token: $u.tokens.access_token,
-        refresh_token: $u.tokens.refresh_token,
-        account_id: $u.tokens.account_id,
-        id_token: ($u.tokens.id_token // null)
+        access_token: $t.access_token,
+        refresh_token: $t.refresh_token,
+        account_id: $t.account_id,
+        id_token: ($t.id_token // null)
       }
     }
   '
@@ -812,13 +964,25 @@ build_codex_auth_from_unified() {
 
 build_openai_object_from_unified() {
   local unified_file="$1"
+  local tokens_source
+
+  tokens_source="$(select_opencode_tokens_source "${unified_file}")"
+
+  if [[ -z "${tokens_source}" ]]; then
+    fail "OpenCode tokens missing for this account. Run 'ai --platform opencode save <account>' after logging in."
+  fi
+
+  if [[ "${tokens_source}" == "shared" ]]; then
+    warn "Using shared tokens for OpenCode. Re-login and run 'ai --platform opencode save <account>' to avoid refresh conflicts."
+  fi
 
   jq -n --slurpfile u "${unified_file}" '
     $u[0] as $u |
+    ($u.opencode.tokens // $u.tokens) as $t |
     {
-      access: $u.tokens.access_token,
-      refresh: $u.tokens.refresh_token,
-      accountId: $u.tokens.account_id,
+      access: ($t.access // $t.access_token),
+      refresh: ($t.refresh // $t.refresh_token),
+      accountId: ($t.accountId // $t.account_id),
       expires: ($u.opencode.expires // 0),
       type: ($u.opencode.type // "oauth")
     }
@@ -885,7 +1049,7 @@ use_account_codex() {
 
   tmp="$(new_tmp)"
   build_codex_auth_from_unified "${unified_file}" > "${tmp}"
-  target_account_id="$(jq -r '.tokens.account_id // empty' "${unified_file}" 2>/dev/null || true)"
+  target_account_id="$(account_id_from_saved_file "${unified_file}")"
 
   if auto_save_active_account codex "${target_account_id}" "${account}"; then
     :
@@ -934,7 +1098,7 @@ use_account_opencode() {
 
   openai_tmp="$(new_tmp)"
   build_openai_object_from_unified "${unified_file}" > "${openai_tmp}"
-  target_account_id="$(jq -r '.tokens.account_id // empty' "${unified_file}" 2>/dev/null || true)"
+  target_account_id="$(account_id_from_saved_file "${unified_file}")"
 
   if auto_save_active_account opencode "${target_account_id}" "${account}"; then
     :
@@ -1082,7 +1246,14 @@ parse_args() {
       [[ $# -eq 1 ]] || fail "Usage: ai ${platform:+--platform ${platform} }save <account>"
       validate_account_name "$1"
       if [[ "${platform}" == "all" ]]; then
-        save_account_all "$1"
+        local selected
+        if selected="$(prompt_save_platform)"; then
+          platform="${selected}"
+        else
+          fail "Save cancelled."
+        fi
+
+        save_account_all "${platform}" "$1"
       else
         if ! platform_available "${platform}"; then
           fail "$(platform_label "${platform}") auth file not found; cannot save."
