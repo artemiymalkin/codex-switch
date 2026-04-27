@@ -14,6 +14,7 @@ legacy-backup-*
 *.secret
 
 # Local artifacts
+node_modules/
 *.log
 *.sqlite
 *.sqlite-*
